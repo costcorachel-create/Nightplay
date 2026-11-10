@@ -19,6 +19,7 @@ struct NightPlayApp: App {
 struct ContentView: View {
     @StateObject private var store = WebStore()
     @AppStorage("np.mode") private var mode = "system"   // system, light or dark
+    @AppStorage("np.loop") private var loop = "off"       // off, list or one
     @Environment(\.colorScheme) private var systemScheme
 
     private var isDark: Bool { mode == "dark" || (mode == "system" && systemScheme == .dark) }
@@ -43,9 +44,12 @@ struct ContentView: View {
                     Spacer()
                     barButton("arrow.clockwise", p) { store.webView.reload() }
                     Spacer()
+                    barButton(loop == "one" ? "repeat.1" : "repeat", p) { cycleLoop() }
+                        .opacity(loop == "off" ? 0.35 : 1.0)
+                    Spacer()
                     barButton(p.isDark ? "sun.max.fill" : "moon.stars.fill", p) { toggleMode() }
                 }
-                .padding(.horizontal, 26)
+                .padding(.horizontal, 20)
                 .padding(.vertical, 11)
                 .background(p.bg)
             }
@@ -60,11 +64,19 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(forcedScheme)
-        .onAppear { store.applyTheme(palette) }
+        .onAppear {
+            store.applyTheme(palette)
+            store.setLoop(loop)
+        }
         .onChange(of: isDark) { _ in store.applyTheme(palette) }
     }
 
     private func toggleMode() { mode = isDark ? "light" : "dark" }
+
+    private func cycleLoop() {
+        loop = loop == "off" ? "list" : (loop == "list" ? "one" : "off")
+        store.setLoop(loop)
+    }
 
     private func barButton(_ symbol: String, _ p: Palette, action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -81,8 +93,10 @@ struct WebContainer: UIViewRepresentable {
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 }
 
-final class WebStore: NSObject, ObservableObject, WKUIDelegate {
+final class WebStore: NSObject, ObservableObject, WKUIDelegate, WKScriptMessageHandler {
     @Published var showHome = true
+    private var palette = Palette.light
+    private var loopMode = "off"
     let webView: WKWebView
     private let home = URL(string: "https://m.youtube.com")!
     private var observers: [NSObjectProtocol] = []
@@ -117,6 +131,52 @@ final class WebStore: NSObject, ObservableObject, WKUIDelegate {
         var v = document.querySelector('video');
         if (wasPlaying && v && v.paused) { v.play(); }
       };
+
+      if (window.top !== window) { return; }
+      var firstSeen = {};
+      try { firstSeen = JSON.parse(sessionStorage.getItem('npFirst') || '{}'); } catch (e) {}
+      var params = function () {
+        try { return new URLSearchParams(location.search); } catch (e) { return new URLSearchParams(''); }
+      };
+      setInterval(function () {
+        var p = params(), l = p.get('list'), v = p.get('v');
+        if (l && v && !firstSeen[l]) {
+          firstSeen[l] = v;
+          try { sessionStorage.setItem('npFirst', JSON.stringify(firstSeen)); } catch (e) {}
+        }
+      }, 1500);
+      var adShowing = function () { return !!document.querySelector('.ad-showing'); };
+      var restart = function (l) {
+        var go = function (v) {
+          if (!v) { return; }
+          try { window.webkit.messageHandlers.np.postMessage('restart'); } catch (e) {}
+          location.href = 'https://m.youtube.com/watch?v=' + v + '&list=' + encodeURIComponent(l) + '&index=1';
+        };
+        fetch('/playlist?list=' + encodeURIComponent(l), { credentials: 'include' })
+          .then(function (r) { return r.text(); })
+          .then(function (t) {
+            var m = t.match(/(?:"|\\x22)videoId(?:"|\\x22):(?:"|\\x22)([\w-]{11})/);
+            go(m ? m[1] : firstSeen[l]);
+          })
+          .catch(function () { go(firstSeen[l]); });
+      };
+      document.addEventListener('ended', function (e) {
+        var v = e.target;
+        if (!v || v.tagName !== 'VIDEO' || adShowing()) { return; }
+        var mode = window.__npLoop || 'off';
+        if (mode === 'one') { v.currentTime = 0; v.play(); return; }
+        if (mode !== 'list') { return; }
+        var p = params(), l = p.get('list'), id = p.get('v');
+        if (!l) { return; }
+        setTimeout(function () {
+          if ((window.__npLoop || 'off') !== 'list') { return; }
+          var c = params(), now = document.querySelector('video');
+          var movedOnInList = c.get('list') === l && c.get('v') !== id;
+          var stillPlaying = c.get('v') === id && now && !now.paused && !now.ended;
+          if (movedOnInList || stillPlaying) { return; }
+          restart(l);
+        }, 3500);
+      }, true);
     })();
     """#
 
@@ -135,6 +195,7 @@ final class WebStore: NSObject, ObservableObject, WKUIDelegate {
         webView.isOpaque = false
         webView.backgroundColor = .black
         webView.uiDelegate = self
+        webView.configuration.userContentController.add(self, name: "np")
         // Present as Safari so Google sign-in and the normal mobile site work.
         webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
         goHome()
@@ -169,15 +230,34 @@ final class WebStore: NSObject, ObservableObject, WKUIDelegate {
 
     /// Recolors the YouTube pages to match the app, now and on every later page load.
     func applyTheme(_ p: Palette) {
-        let js = WebStore.themeScript(p)
-        let ucc = webView.configuration.userContentController
-        ucc.removeAllUserScripts()
-        ucc.addUserScript(WKUserScript(source: WebStore.script, injectionTime: .atDocumentStart, forMainFrameOnly: false))
-        ucc.addUserScript(WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        palette = p
+        installScripts()
         webView.overrideUserInterfaceStyle = p.isDark ? .dark : .light
         webView.backgroundColor = UIColor(p.bg)
         webView.scrollView.backgroundColor = UIColor(p.bg)
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        webView.evaluateJavaScript(WebStore.themeScript(p), completionHandler: nil)
+    }
+
+    /// "off", "list" (repeat the whole playlist) or "one" (repeat the current video).
+    func setLoop(_ mode: String) {
+        loopMode = mode
+        installScripts()
+        webView.evaluateJavaScript("window.__npLoop = '\(mode)';", completionHandler: nil)
+    }
+
+    private func installScripts() {
+        let ucc = webView.configuration.userContentController
+        ucc.removeAllUserScripts()
+        ucc.addUserScript(WKUserScript(source: "window.__npLoop = '\(loopMode)';", injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        ucc.addUserScript(WKUserScript(source: WebStore.script, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        ucc.addUserScript(WKUserScript(source: WebStore.themeScript(palette), injectionTime: .atDocumentStart, forMainFrameOnly: true))
+    }
+
+    // The page says it is reloading to restart a playlist: keep the app awake and press play once it loads.
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard (message.body as? String) == "restart" else { return }
+        keepAlive(seconds: 20, playAt: [2.0, 4.0, 6.0, 9.0, 13.0],
+                  js: "(function(){var v=document.querySelector('video'); if(v&&v.paused){v.play();}})();")
     }
 
     private static func themeScript(_ p: Palette) -> String {
@@ -231,18 +311,22 @@ final class WebStore: NSObject, ObservableObject, WKUIDelegate {
 
     // iOS pauses web video when the app leaves the screen; nudge it back on.
     private func resumeInBackground() {
+        keepAlive(seconds: 3, playAt: [0.3, 1.0, 2.0], js: "window.__npResume && window.__npResume();")
+    }
+
+    private func keepAlive(seconds: Double, playAt delays: [Double], js: String) {
         var task: UIBackgroundTaskIdentifier = .invalid
         task = UIApplication.shared.beginBackgroundTask {
             UIApplication.shared.endBackgroundTask(task)
             task = .invalid
         }
         try? AVAudioSession.sharedInstance().setActive(true)
-        for delay in [0.3, 1.0, 2.0] {
+        for delay in delays {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.webView.evaluateJavaScript("window.__npResume && window.__npResume();", completionHandler: nil)
+                self?.webView.evaluateJavaScript(js, completionHandler: nil)
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
             if task != .invalid {
                 UIApplication.shared.endBackgroundTask(task)
                 task = .invalid
