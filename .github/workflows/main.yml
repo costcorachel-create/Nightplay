@@ -1,0 +1,32 @@
+name: Build IPA
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find project folder
+        run: echo "PROJ=$(dirname "$(find . -name project.yml -not -path './.git/*' | head -n 1)")" >> $GITHUB_ENV
+      - name: Generate Xcode project
+        working-directory: ${{ env.PROJ }}
+        run: |
+          brew install xcodegen
+          xcodegen generate
+      - name: Build (unsigned)
+        working-directory: ${{ env.PROJ }}
+        run: |
+          xcodebuild -project NightPlay.xcodeproj -scheme NightPlay \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+      - name: Package IPA
+        working-directory: ${{ env.PROJ }}
+        run: |
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/NightPlay.app Payload/
+          zip -r NightPlay.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NightPlay-ipa
+          path: ${{ env.PROJ }}/NightPlay.ipa
