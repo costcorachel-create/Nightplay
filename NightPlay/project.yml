@@ -14,6 +14,7 @@ targets:
         CFBundleDisplayName: NightPlay
         UIBackgroundModes: [audio]
         UILaunchScreen: {}
+        UIAppFonts: [PinyonScript-Regular.ttf]
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft

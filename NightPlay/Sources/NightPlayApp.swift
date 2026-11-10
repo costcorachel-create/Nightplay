@@ -19,6 +19,7 @@ struct NightPlayApp: App {
 struct ContentView: View {
     @StateObject private var store = WebStore()
     @AppStorage("np.mode") private var mode = "system"   // system, light or dark
+    @State private var showIntro = true
     @AppStorage("np.loop") private var loop = "off"       // off, list or one
     @Environment(\.colorScheme) private var systemScheme
 
@@ -34,7 +35,8 @@ struct ContentView: View {
         ZStack {
             VStack(spacing: 0) {
                 WebContainer(webView: store.webView)
-                Rectangle().fill(p.gold).frame(height: 1.5)
+                HLine().stroke(p.petal, style: StrokeStyle(lineWidth: 5, lineCap: .round, dash: [0.1, 9]))
+                    .frame(height: 5).padding(.horizontal, 8).padding(.top, 4).background(p.bg)
                 HStack {
                     barButton("chevron.left", p) { store.webView.goBack() }
                     Spacer()
@@ -47,7 +49,7 @@ struct ContentView: View {
                     barButton(loop == "one" ? "repeat.1" : "repeat", p) { cycleLoop() }
                         .opacity(loop == "off" ? 0.35 : 1.0)
                     Spacer()
-                    barButton(p.isDark ? "sun.max.fill" : "moon.stars.fill", p) { toggleMode() }
+                    barButton(p.isDark ? "sun.max.fill" : "moon.fill", p) { toggleMode() }
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 11)
@@ -61,6 +63,13 @@ struct ContentView: View {
                          onOpen: { store.open($0) },
                          onToggleMode: toggleMode)
                     .transition(.opacity)
+            }
+
+            if showIntro {
+                IntroView(palette: p) {
+                    withAnimation(.easeInOut(duration: 0.6)) { showIntro = false }
+                }
+                .transition(.opacity)
             }
         }
         .preferredColorScheme(forcedScheme)
